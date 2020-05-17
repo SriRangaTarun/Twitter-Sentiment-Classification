@@ -1,4 +1,8 @@
+# Use BF16 with PyTorch XLA
+
 !export XLA_USE_BF16=1
+
+# Import necessary libraries
 
 import time
 import colored
@@ -44,10 +48,14 @@ ROBERTA_UNITS = 768
 VAL_BATCH_SIZE = 384
 MODEL_SAVE_PATH = 'sentiment_model.pt'
 
+# Load data and set random seeds
+
 np.random.seed(42)
 torch.manual_seed(42)
 test_df = pd.read_csv(test_data_path)
 train_df = pd.read_csv(train_data_path)
+
+# Define PyTorch dataset to input data to roBERTa
 
 class TweetDataset(Dataset):
     def __init__(self, data, tokenizer):
@@ -77,6 +85,8 @@ class TweetDataset(Dataset):
         sentiment = [self.sentiment_dict[self.sentiment[i]]]
         sentiment = torch.FloatTensor(to_categorical(sentiment, num_classes=3))
         return sentiment, torch.LongTensor(tweet_ids), torch.LongTensor(attention_mask)
+    
+# Define roBERTa-base model with dropout and dense head
         
 class Roberta(nn.Module):
     def __init__(self):
@@ -90,13 +100,19 @@ class Roberta(nn.Module):
         inp = inp.view(-1, MAXLEN)
         _, self.feat = self.roberta(inp, att)
         return self.softmax(self.dense(self.drop(self.feat)))
+    
+# Shuffle train data and split into train and val sets (80/20)
         
 train_df = shuffle(train_df)
 split = np.int32(SPLIT*len(train_df))
 val_df, train_df = train_df[split:], train_df[:split]
 
+# Define tokenizer
+
 model = 'roberta-base'
 tokenizer = RobertaTokenizer.from_pretrained(model)
+
+# Define cross entropy loss function and accuracy for training and evaluation
 
 def cel(inp, target):
     _, labels = target.max(dim=1)
@@ -106,6 +122,8 @@ def accuracy(inp, target):
     inp_ind = inp.max(axis=1).indices
     target_ind = target.max(axis=1).indices
     return (inp_ind == target_ind).float().sum(axis=0)/len(inp_ind)
+
+# Define function to print metrics during training
     
 def print_metric(data, batch, epoch, start, end, metric, typ):
 
@@ -119,6 +137,8 @@ def print_metric(data, batch, epoch, start, end, metric, typ):
     print(pre % fonts[0] , end='')
     t = typ, metric, "%s", data, "%s"
     print("{} {}: {}{}{}".format(*t) % fonts[1] + "  " + time % fonts[2])
+    
+# Train model on TPU using PyTorch XLA
     
 device = xm.xla_device()
 
@@ -195,6 +215,8 @@ for epoch in range(EPOCHS):
     
 print("ENDING TRAINING ...")
 
+# Check testing performance
+
 test_set = TweetDataset(test_df, tokenizer)
 test_loader = DataLoader(test_set, batch_size=VAL_BATCH_SIZE)
 
@@ -214,9 +236,33 @@ test_preds = torch.cat(test_preds, axis=0)
 test_targs = torch.cat(test_targs, axis=0)
 test_accuracy = accuracy(test_preds, test_targs.squeeze(dim=1).to(device))
 
+fonts = (fg(212), attr('reset'))
+acc = np.round(test_accuracy.item()*100, 2)
+print("{}: {}{}{}".format("Test acc", "%s", str(acc), "%s") % fonts + " %")
+
+# Predict sentiment for random sentences to check performance
+
+def predict_sentiment(tweet):
+    pg, tg = 'post', 'post'
+    tweet_ids = tokenizer.encode(tweet.strip())
+    sent = {0: 'positive', 1: 'neutral', 2: 'negative'}
+
+    att_mask_idx = len(tweet_ids) - 1
+    if 0 not in tweet_ids: tweet_ids = 0 + tweet_ids
+    tweet_ids = pad([tweet_ids], maxlen=MAXLEN, value=1, padding=pg, truncating=tg)
+
+    att_mask = np.zeros(MAXLEN)
+    att_mask[1:att_mask_idx] = 1
+    att_mask = att_mask.reshape((1, -1))
+    if 2 not in tweet_ids: tweet_ids[-1], att_mask[-1] = 2, 0
+    tweet_ids, att_mask = torch.LongTensor(tweet_ids), torch.LongTensor(att_mask)
+    return sent[np.argmax(network.forward(tweet_ids.to(device), att_mask.to(device)).detach().cpu().numpy())]
+
 predict_sentiment("It was okay I guess?")
 predict_sentiment("I want to hide omg !!!")
 predict_sentiment("I am feeling great today ...")
+
+# Move model to CPU and save it to 'sentiment_model.pt'
 
 network = network.cpu()
 torch.save(network.state_dict(), MODEL_SAVE_PATH)
