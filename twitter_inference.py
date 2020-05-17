@@ -7,8 +7,6 @@ import torch
 import torch.nn as nn
 from torch import LongTensor
 from transformers import RobertaModel, RobertaTokenizer
-
-from tqdm.notebook import tqdm
 from keras.preprocessing.sequence import pad_sequences as pad
 
 # Define hyperparameters and paths
@@ -70,6 +68,4 @@ def predict_sentiment(tweet):
 
 parser.add_argument('text')
 args = parser.parse_args()
-
-tweet = args.tweet
-print(predict_sentiment(tweet)))
+print(predict_sentiment(args.tweet)))
