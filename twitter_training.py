@@ -237,7 +237,7 @@ with torch.no_grad():
 
         targ = targ.squeeze(dim=1)
         pred = network.forward(test_in, test_att)
-        test_accuracy = accuracy(pred, targ.to(device))
+        test_accuracy = accuracy(pred, targ.to(device))*len(pred)
 
 test_accuracy /= len(test_set)
 fonts = (fg(212), attr('reset'))
