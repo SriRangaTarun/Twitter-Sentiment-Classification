@@ -221,22 +221,25 @@ print("ENDING TRAINING ...")
 test_set = TweetDataset(test_df, tokenizer)
 test_loader = DataLoader(test_set, batch_size=VAL_BATCH_SIZE)
 
-network.eval()
-for test_batch in tqdm(test_loader):
-    test_preds, test_targs = [], []
-    targ, test_in, test_att = test_batch
+device = xm.xla_device()
+test_set = TweetDataset(test_df, tokenizer)
+test_loader = DataLoader(test_set, batch_size=VAL_BATCH_SIZE)
 
-    with torch.no_grad():
+network.eval()
+test_accuracy = 0
+with torch.no_grad():
+    for test_batch in tqdm(test_loader):
+        targ, test_in, test_att = test_batch
+
         network = network.to(device)
         test_in = test_in.to(device)
         test_att = test_att.to(device)
+
+        targ = targ.squeeze(dim=1)
         pred = network.forward(test_in, test_att)
-        test_preds.append(pred); test_targs.append(targ)
+        test_accuracy = accuracy(pred, targ.to(device))
 
-test_preds = torch.cat(test_preds, axis=0)
-test_targs = torch.cat(test_targs, axis=0)
-test_accuracy = accuracy(test_preds, test_targs.squeeze(dim=1).to(device))
-
+test_accuracy /= len(test_set)
 fonts = (fg(212), attr('reset'))
 acc = np.round(test_accuracy.item()*100, 2)
 print("{}: {}{}{}".format("Test acc", "%s", str(acc), "%s") % fonts + " %")
