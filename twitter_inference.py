@@ -66,6 +66,6 @@ def predict_sentiment(tweet):
 
 # Predict sentiment on random tweet
 
-parser.add_argument('text')
+parser.add_argument('tweet')
 args = parser.parse_args()
-print(predict_sentiment(args.tweet)))
+print(predict_sentiment(args.tweet))
