@@ -141,80 +141,116 @@ def print_metric(data, batch, epoch, start, end, metric, typ):
     
 # Train model on TPU using PyTorch XLA
     
-device = xm.xla_device()
+global val_losses; global train_losses
+global val_accuracies; global train_accuracies
 
-val_df = val_df.reset_index(drop=True)
-val_set = TweetDataset(val_df, tokenizer)
-val_loader = DataLoader(val_set, batch_size=VAL_BATCH_SIZE)
+def train_fn():
+    size = 1
+    torch.manual_seed(42)
+    train_df = pd.read_csv('../input/tweet-sentiment-extraction/train.csv')
 
-train_df = train_df.reset_index(drop=True)
-train_set = TweetDataset(train_df, tokenizer)
-train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
+    train_df = shuffle(train_df)
+    split = np.int32(SPLIT*len(train_df))
+    val_df, train_df = train_df[split:], train_df[:split]
+
+    val_df = val_df.reset_index(drop=True)
+    val_set = TweetDataset(val_df, tokenizer)
+    val_sampler = DistributedSampler(val_set, num_replicas=8,
+                                     rank=xm.get_ordinal(), shuffle=True)
+
+    train_df = train_df.reset_index(drop=True)
+    train_set = TweetDataset(train_df, tokenizer)
+    train_sampler = DistributedSampler(train_set, num_replicas=8,
+                                       rank=xm.get_ordinal(), shuffle=True)
     
-network = Roberta().to(device)
-optimizer = Adam([{'params': network.dense.parameters(), 'lr': LR[1]},
-                  {'params': network.roberta.parameters(), 'lr': LR[0]}])
+    val_loader = DataLoader(val_set, VAL_BATCH_SIZE,
+                            sampler=val_sampler, num_workers=0, drop_last=True)
 
-val_losses, val_accuracies = [], []
-train_losses, train_accuracies = [], []
+    train_loader = DataLoader(train_set, BATCH_SIZE,
+                              sampler=train_sampler, num_workers=0, drop_last=True)
+
+    device = xm.xla_device()
+    network = Roberta().to(device)
+    optimizer = Adam([{'params': network.dense.parameters(), 'lr': LR[1]*size},
+                      {'params': network.roberta.parameters(), 'lr': LR[0]*size}])
+
+    val_losses, val_accuracies = [], []
+    train_losses, train_accuracies = [], []
     
-start = time.time()
-print("STARTING TRAINING ...\n")
+    start = time.time()
+    xm.master_print("STARTING TRAINING ...\n")
 
-for epoch in range(EPOCHS):
+    for epoch in range(EPOCHS):
 
-    batch = 1
-    network.train()
-    fonts = (fg(48), attr('reset'))
-    print(("EPOCH %s" + str(epoch+1) + "%s") % fonts)
+        batch = 1
+        network.train()
+        fonts = (fg(48), attr('reset'))
+        xm.master_print(("EPOCH %s" + str(epoch+1) + "%s") % fonts)
+
+        val_parallel = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
+        train_parallel = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
         
-    for train_batch in train_loader:
-        train_targ, train_in, train_att = train_batch
+        for train_batch in train_parallel:
+            train_targ, train_in, train_att = train_batch
             
-        network = network.to(device)
-        train_in = train_in.to(device)
-        train_att = train_att.to(device)
-        train_targ = train_targ.to(device)
-
-        train_preds = network.forward(train_in, train_att)
-        train_loss = cel(train_preds, train_targ.squeeze(dim=1))
-        train_accuracy = accuracy(train_preds, train_targ.squeeze(dim=1))
-
-        optimizer.zero_grad()
-        train_loss.backward()
-        xm.optimizer_step(optimizer, barrier=True)
-            
-        end = time.time()
-        batch = batch + 1
-        acc = np.round(train_accuracy.item(), 3)
-        print_metric(acc, batch, None, start, end, metric="acc", typ="Train")
-
-    network.eval()
-    val_loss, val_accuracy = 0, 0
-    for val_batch in tqdm(val_loader):
-        targ, val_in, val_att = val_batch
-
-        with torch.no_grad():
-            targ = targ.to(device)
-            val_in = val_in.to(device)
-            val_att = val_att.to(device)
             network = network.to(device)
+            train_in = train_in.to(device)
+            train_att = train_att.to(device)
+            train_targ = train_targ.to(device)
 
-            pred = network.forward(val_in, val_att)
-            val_loss += cel(pred, targ.squeeze(dim=1)).item()*len(pred)
-            val_accuracy += accuracy(pred, targ.squeeze(dim=1)).item()*len(pred)
+            train_preds = network.forward(train_in, train_att)
+            train_loss = cel(train_preds, train_targ.squeeze(dim=1))/len(train_in)
+            train_accuracy = accuracy(train_preds, train_targ.squeeze(dim=1))/len(train_in)
+
+            optimizer.zero_grad()
+            train_loss.backward()
+            xm.optimizer_step(optimizer)
+            
+            end = time.time()
+            batch = batch + 1
+            acc = np.round(train_accuracy.item(), 3)
+            print_metric(acc, batch, None, start, end, metric="acc", typ="Train")
+
+        val_loss, val_accuracy, val_points = 0, 0, 0
+
+        network.eval()
+        with torch.no_grad():
+            for val_batch in val_parallel:
+                targ, val_in, val_att = val_batch
+
+                targ = targ.to(device)
+                val_in = val_in.to(device)
+                val_att = val_att.to(device)
+                network = network.to(device)
+            
+                val_points += len(targ)
+                pred = network.forward(val_in, val_att)
+                val_loss += cel(pred, targ.squeeze(dim=1)).item()
+                val_accuracy += accuracy(pred, targ.squeeze(dim=1)).item()
         
-    end = time.time()
-    val_loss /= len(val_set)
-    val_accuracy /= len(val_set)
-    acc = np.round(val_accuracy, 3)
-    print_metric(acc, None, epoch, start, end, metric="acc", typ="Val")
+        end = time.time()
+        val_loss /= val_points
+        val_accuracy /= val_points
+        acc = xm.mesh_reduce('acc', val_accuracy, lambda x: sum(x)/len(x))
+        print_metric(np.round(acc, 3), None, epoch, start, end, metric="acc", typ="Val")
     
-    print("")
-    val_losses.append(val_loss); train_losses.append(train_loss)
-    val_accuracies.append(val_accuracy); train_accuracies.append(train_accuracy)
+        xm.master_print("")
+        val_losses.append(val_loss); train_losses.append(train_loss.item())
+        val_accuracies.append(val_accuracy); train_accuracies.append(train_accuracy.item())
+
+    xm.master_print("ENDING TRAINING ...")
+    xm.save(network.state_dict(), MODEL_SAVE_PATH); del network; gc.collect()
+
+    metric_names = ['val_loss_', 'train_loss_', 'val_acc_', 'train_acc_']
+    metric_lists = [val_losses, train_losses, val_accuracies, train_accuracies]
     
-print("ENDING TRAINING ...")
+    for i, metric_list in enumerate(metric_lists):
+        for j, metric_value in enumerate(metric_list):
+            torch.save(metric_value, metric_names[i] + str(j) + '.pt')
+
+FLAGS = {}
+def _mp_fn(rank, flags): train_fn()
+xmp.spawn(_mp_fn, args=(FLAGS,), nprocs=8, start_method='fork')
 
 # Check testing performance
 
