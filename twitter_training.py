@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from tqdm.notebook import tqdm
 from sklearn.utils import shuffle
