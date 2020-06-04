@@ -148,7 +148,7 @@ global val_accuracies; global train_accuracies
 def train_fn():
     size = 1
     torch.manual_seed(42)
-    train_df = pd.read_csv('../input/tweet-sentiment-extraction/train.csv')
+    train_df = pd.read_csv(train_data_path)
 
     train_df = shuffle(train_df)
     split = np.int32(SPLIT*len(train_df))
